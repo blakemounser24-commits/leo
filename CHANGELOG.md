@@ -44,6 +44,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 
 ### Orchestration and concurrency
 
+- Clarify in `SKILL.md` that `--jobs` independence is runtime independence: no `CHECK:` may write what another reads or writes (directories, generated files, caches, ports, databases, Git or package-manager locks). A static dependency view cannot establish it; stay sequential when in doubt.
 - Add scoped pipelines under `.unlazy/<scope>/`, qualified gate ids, session binding, append-only status logging, and explicit scope discovery refusal when the target is ambiguous.
 - Add repository-relative `OWNS:` declarations with `--claim` and `--release`. Serialize claim discovery and creation under one lock, reject unsafe paths, and use conservative overlap detection.
 - Treat a scope/leaf identity as an exclusive lease owner so duplicate workers cannot both claim and later release the same logical lease.

@@ -32,6 +32,8 @@ run modes:
   --reverify            re-run every runnable gate and demote stale failures
   --approve             approve each exact pending oracle, then run it
   --jobs N              rolling concurrency, integer 1..64 (default 1)
+  --no-share            run every gate's command separately, even when two
+                        gates declare the identical command, directory, shell
   --timeout S           per-check timeout, integer seconds 1..86400 (default 120)
   --shell PATH          command shell (UNLAZY_SHELL, then platform default)
   --cwd DIR             default CHECK directory (explicit: file dir; discovered: --root)
@@ -52,12 +54,18 @@ CHECK execution requires prior approval keyed to the exact CHECK, EXPECT,
 resolved CWD, resolved shell, timeout, output/regex limits, platform, and PATH.
 Approvals live outside the repository under ~/.unlazy/approved by default.
 
+Gates that declare the identical command, resolved directory, and shell name one
+observation: it is executed once per run and every one of those gates evaluates
+its own EXPECT against that shared output. Each gate still needs its own
+approval and writes its own evidence. Use --no-share when a command mutates
+state and each gate must observe its own separate execution.
+
 exit codes: 0 all met/action succeeded; 1 unmet; 2 usage/parse/infrastructure;
             3 lease conflict.`;
 
 const FLAG_OPTIONS = new Set([
   "--status", "--reverify", "--approve", "--claim", "--release",
-  "--list-scopes", "--help", "-h",
+  "--no-share", "--list-scopes", "--help", "-h",
 ]);
 const VALUE_OPTIONS = new Set([
   "--scope", "--leaf", "--timeout", "--jobs", "--cwd", "--root",
@@ -168,14 +176,15 @@ if (action && (opt.status || opt.reverify || opt.approve)) failUsage(action + " 
 if (action && fileArgs.length) failUsage(action + " cannot be combined with explicit files");
 if (fileArgs.length && opt.scope) failUsage("explicit files and --scope are mutually exclusive");
 if (opt.leaf && !opt.claim && !opt.release) failUsage("--leaf is only valid with --claim or --release");
-if ((opt.timeout || opt.jobs || opt.shell || opt.cwd) && (action || opt.status)) {
-  failUsage("--timeout, --jobs, --shell, and --cwd are execution options only");
+if ((opt.timeout || opt.jobs || opt["no-share"] || opt.shell || opt.cwd) && (action || opt.status)) {
+  failUsage("--timeout, --jobs, --no-share, --shell, and --cwd are execution options only");
 }
 
 const root = resolve(opt.root || process.cwd());
 asDirectory(root, "--root");
 const timeoutSeconds = timeoutValue(opt.timeout);
 const jobs = jobCount(opt.jobs);
+const shareCommands = !opt["no-share"];
 const defaultCwd = resolve(root, opt.cwd || ".");
 if (!action && !opt.status) asDirectory(defaultCwd, "--cwd");
 
@@ -600,7 +609,11 @@ function outputFingerprint(output) {
   return { sha256: sha256(value), bytes: Buffer.byteLength(value, "utf8") };
 }
 
-function runCheck(task) {
+// Execute one gate command and report only what the process itself decided:
+// output, exit status, and any execution-level failure. EXPECT belongs to the
+// individual gate, not to the process, so it is evaluated separately in
+// resultFor. That split is what lets several gates share one execution.
+function runCommand(task) {
   return new Promise((done) => {
     const chunks = { stdout: [], stderr: [] };
     let bytes = 0;
@@ -614,7 +627,7 @@ function runCheck(task) {
     let cleanupDiagnostic = null;
     let child;
 
-    const settle = async (exitCode, signal) => {
+    const settle = (exitCode, signal) => {
       if (closed) return;
       closed = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -630,20 +643,13 @@ function runCheck(task) {
       const fingerprint = outputFingerprint(output);
       const normalizedOverflow = fingerprint.bytes > MAX_OUTPUT_BYTES;
       const overflow = rawOverflow || normalizedOverflow;
-      const match = timedOut || overflow || spawnError
-        ? { matched: false }
-        : await safeRegexMatch(task.gate.expectation, output);
       const cleanupSuffix = cleanupDiagnostic ? "; cleanup: " + cleanupDiagnostic : "";
-      const error = timedOut ? "timed out after " + timeoutSeconds + "s" + cleanupSuffix
+      const execError = timedOut ? "timed out after " + timeoutSeconds + "s" + cleanupSuffix
         : overflow ? "output exceeded " + MAX_OUTPUT_BYTES + " bytes" +
           (rawOverflow ? "" : " after stdout/stderr UTF-8 combination") + cleanupSuffix
           : spawnError ? spawnError.message
-            : match.error || null;
-      done({
-        ...task, output, outputFingerprint: fingerprint,
-        exitCode, signal, matched: Boolean(match.matched), error,
-        ok: !error && exitCode === 0 && Boolean(match.matched),
-      });
+            : null;
+      done({ output, outputFingerprint: fingerprint, exitCode, signal, execError });
     };
 
     const stopChild = () => {
@@ -691,8 +697,8 @@ function runCheck(task) {
       });
     } catch (error) {
       done({
-        ...task, ok: false, output: "", outputFingerprint: outputFingerprint(""),
-        exitCode: null, signal: null, matched: false, error: error.message,
+        output: "", outputFingerprint: outputFingerprint(""),
+        exitCode: null, signal: null, execError: error.message,
       });
       return;
     }
@@ -707,20 +713,79 @@ function runCheck(task) {
   });
 }
 
-async function runRolling(tasks, limit) {
-  const results = new Array(tasks.length);
+// Decide one gate against an execution. An execution-level failure (timeout,
+// overflow, spawn error) already disqualifies every gate that shares it and
+// keeps its precedence over a regex failure; EXPECT is still this gate's own.
+async function resultFor(task, execution) {
+  const match = execution.execError
+    ? { matched: false }
+    : await safeRegexMatch(task.gate.expectation, execution.output);
+  const error = execution.execError || match.error || null;
+  return {
+    ...task,
+    output: execution.output,
+    outputFingerprint: execution.outputFingerprint,
+    exitCode: execution.exitCode,
+    signal: execution.signal,
+    matched: Boolean(match.matched),
+    error,
+    ok: !error && execution.exitCode === 0 && Boolean(match.matched),
+  };
+}
+
+// Two gates that declare the same command, in the same resolved directory,
+// under the same shell are naming one observation, so run it once and let each
+// gate decide its own EXPECT against that output. The saving compounds in a
+// tree, where one shared suite is otherwise re-executed for every gate that
+// names it. --no-share restores one execution per gate.
+function shareGroupsFor(tasks) {
+  const groups = [];
+  const index = new Map();
+  for (let position = 0; position < tasks.length; position++) {
+    const task = tasks[position];
+    const member = { task, position };
+    // Encode the three parts unambiguously. A plain separator would let a
+    // directory ending in one fragment and a command starting with the next
+    // collide, sharing one execution between two different oracles.
+    const key = JSON.stringify([shell, task.cwd, task.gate.check]);
+    const existing = shareCommands ? index.get(key) : undefined;
+    if (existing) {
+      existing.members.push(member);
+      continue;
+    }
+    const group = { leader: task, members: [member] };
+    groups.push(group);
+    if (shareCommands) index.set(key, group);
+  }
+  return groups;
+}
+
+async function runRolling(groups, limit) {
+  const decided = new Array(groups.length);
   let next = 0;
   async function worker() {
     for (;;) {
       const index = next++;
-      if (index >= tasks.length) return;
-      results[index] = await runCheck(tasks[index]);
+      if (index >= groups.length) return;
+      const group = groups[index];
+      const execution = await runCommand(group.leader);
+      const results = [];
+      for (const member of group.members) {
+        results.push({ position: member.position, result: await resultFor(member.task, execution) });
+      }
+      decided[index] = results;
     }
   }
   const workers = [];
-  for (let index = 0; index < Math.min(limit, tasks.length); index++) workers.push(worker());
+  for (let index = 0; index < Math.min(limit, groups.length); index++) workers.push(worker());
   await Promise.all(workers);
-  return results;
+  // Restore ledger order: the transcript and every write-back stay deterministic
+  // regardless of concurrency or which gate happened to lead a shared command.
+  const ordered = [];
+  for (const results of decided) {
+    for (const entry of results) ordered[entry.position] = entry.result;
+  }
+  return ordered;
 }
 
 const pending = [];
@@ -780,10 +845,22 @@ for (const task of pending) {
   runnable.push(task);
 }
 
-for (const task of runnable) {
-  console.log("  RUN  " + qualify(task.file, task.gate.id) + " shell=" + shell + " cwd=" + task.cwd + " PATH=" + pathTranscript);
+const shareGroups = shareGroupsFor(runnable);
+if (runnable.length) {
+  // State the concurrency and the shared-command reduction in the transcript,
+  // so a fast run can be told from a run that quietly skipped work.
+  console.log("Jobs: " + jobs + "; checks: " + runnable.length +
+    "; commands: " + shareGroups.length + (shareCommands ? "" : " (sharing off)"));
 }
-const results = opt.status ? [] : await runRolling(runnable, jobs);
+for (const group of shareGroups) {
+  console.log("  RUN  " + qualify(group.leader.file, group.leader.gate.id) +
+    " shell=" + shell + " cwd=" + group.leader.cwd + " PATH=" + pathTranscript);
+  for (const member of group.members.slice(1)) {
+    console.log("  SHARED " + qualify(member.task.file, member.task.gate.id) +
+      ": same command, directory, and shell as " + qualify(group.leader.file, group.leader.gate.id));
+  }
+}
+const results = opt.status ? [] : await runRolling(shareGroups, jobs);
 for (const result of results) {
   const fingerprint = result.outputFingerprint;
   const outputSummary = result.ok

@@ -62,6 +62,20 @@ node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --reverify --jobs 4 .un
 
 The limit is rolling: start another check when one finishes instead of waiting for a fixed batch. Output and file updates remain deterministic in ledger order. `--jobs` controls command execution, not subagent dispatch and not dependency readiness. Use [dispatch waves](dispatch.md) for native agent concurrency.
 
+## Shared commands
+
+Within one run, gates that declare the identical command, resolved `CWD:`, and shell are naming one observation. The checker executes it once and each of those gates evaluates its own `EXPECT:` against that output, so a suite named by several gates costs one execution instead of one per gate. The transcript states the reduction:
+
+```text
+Jobs: 4; checks: 12; commands: 7
+  RUN  leaf-1.1.1:G1 shell=... cwd=... PATH=...
+  SHARED leaf-1.1.2:G1: same command, directory, and shell as leaf-1.1.1:G1
+```
+
+Sharing never widens what a gate proves. Each gate still needs its own approval, decides its own `EXPECT:`, and writes its own bound evidence, and an execution that times out, overflows, or exits nonzero fails every gate that shared it. Sharing spans one invocation only: a per-leaf `--reverify` is its own process, so the placement rule in [gates.md](gates.md) still applies.
+
+Pass `--no-share` when a command mutates state and each gate must observe its own separate execution. That is a sign the command is not a pure oracle; prefer fixing the gate.
+
 ## Rolling dispatch
 
 Treat dispatch as a loop:

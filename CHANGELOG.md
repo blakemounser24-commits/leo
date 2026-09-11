@@ -50,6 +50,8 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Canonicalize the named-path identity used by every file lock, so real-root and symlink-root spellings of one physical repository cannot enter the same lease, dispatch, hook-state, or ledger critical section concurrently.
 - Describe scopes and leases as coordination rather than filesystem or process isolation.
 - Add opt-in `--jobs <N>` rolling check concurrency while retaining sequential default behavior and deterministic ledger-order reporting.
+- Execute one command per distinct oracle instead of one per gate. Gates that declare the identical command, resolved `CWD:`, and shell now share a single execution within a run, and each still requires its own approval, decides its own `EXPECT:` against that output, and writes its own bound evidence. An execution that times out, overflows, or exits nonzero fails every gate that shared it. `--no-share` restores one execution per gate for a command that mutates state.
+- State the concurrency and the shared-command reduction in the run transcript (`Jobs: N; checks: C; commands: G`) and name each sharing gate, so a fast run cannot be mistaken for a run that quietly skipped work.
 - Add declared readiness states, real `node-*` branch paths, explicit dependencies, and rolling leaf dispatch to the plan and orchestration guide.
 - Add atomic native dispatch waves that require every independent leaf to receive a distinct host start handle before the first return is accepted.
 - Add auditable dispatch abandonment for irrecoverable partial launches. Preserve the reason and timestamps in state, make status non-successful, and keep abandoned waves visible without permanently blocking Stop.

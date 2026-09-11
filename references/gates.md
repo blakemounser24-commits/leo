@@ -137,6 +137,14 @@ can satisfy alone. A parent re-verifies a returned leaf by naming its exact
 ledger; a whole-project check smuggled into a leaf therefore makes every per-leaf
 `--reverify` re-run the entire tree instead of the one leaf that returned.
 
+Within a single run, gates that declare the identical command, resolved `CWD:`,
+and shell execute once and share that output; see the shared-commands section of
+[orchestration.md](orchestration.md). That removes the duplicate cost inside one
+invocation, not across them, so it does not make a whole-project check in a leaf
+ledger acceptable: each leaf `--reverify` is a separate process that would still
+re-run the entire tree. Write a `CHECK:` that observes rather than mutates, so
+one execution can honestly answer for every gate that names it.
+
 Cross-cutting outcomes belong in the branch ledger, where they run once after all
 named children return: interface compatibility, end-to-end behavior, and
 regression across the joined work. `templates/gates-node.md` reserves `N1`

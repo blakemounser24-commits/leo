@@ -759,7 +759,10 @@ test("regex: worker startup is outside the match budget and concurrency is cappe
     s.write("simple.mjs", "console.log('total: 42 items');\n");
     let ledger = "";
     for (let index = 1; index <= 32; index++) {
-      ledger += gate("G" + index, "simple regex " + index, "node simple.mjs", "/total: \\d+ items/");
+      // Distinct arguments keep these 32 separate executions. Identical
+      // commands would collapse into one shared execution and stop exercising
+      // concurrent matching, which is exactly what this regression measures.
+      ledger += gate("G" + index, "simple regex " + index, "node simple.mjs " + index, "/total: \\d+ items/");
     }
     s.write("GATES.md", ledger);
     const result = await gateRun(s, ["--jobs", "32", "--timeout", "10"]);
@@ -884,6 +887,130 @@ test("jobs: rolling concurrency is opt-in and output stays in gate order", async
   } finally { s.cleanup(); }
 });
 
+test("share: one command serves every gate that declares it, and each keeps its own evidence", async () => {
+  const s = sandbox();
+  try {
+    s.write("suite.mjs",
+      "import { appendFileSync } from 'node:fs';\n" +
+      "appendFileSync('runs.log','run\\n');\n" +
+      "console.log('suite ok');\n");
+    s.write("own.mjs", "console.log('own ok');\n");
+    s.write("GATES.md", gate("G1", "suite", "node suite.mjs", "suite ok") +
+      gate("G2", "own", "node own.mjs", "own ok") +
+      gate("G3", "suite again", "node suite.mjs", "suite ok"));
+    const result = await gateRun(s, []);
+    assert(result.code === 0, result.out);
+    has(result.out, "Jobs: 1; checks: 3; commands: 2");
+    has(result.out, "SHARED GATES:G3: same command, directory, and shell as GATES:G1");
+    assert(s.read("runs.log").trim().split(/\r?\n/).length === 1,
+      "the shared command did not run exactly once: " + JSON.stringify(s.read("runs.log")));
+    // Transcript order follows the ledger, not the shared execution grouping.
+    assert(result.out.indexOf("PASS GATES:G1") < result.out.indexOf("PASS GATES:G2") &&
+      result.out.indexOf("PASS GATES:G2") < result.out.indexOf("PASS GATES:G3"),
+      "sharing reordered the transcript\n" + result.out);
+    const ledger = s.read("GATES.md");
+    assert(ledger.match(/EVIDENCE: automatic-evidence=v1; definition-sha256=/g).length === 3,
+      "a sharing gate did not write its own bound evidence\n" + ledger);
+    assert((ledger.match(/^- \[x\] G/gm) || []).length === 3, "a sharing gate was left unchecked\n" + ledger);
+    // The digest binds the definition, not the id, so the two gates that
+    // declare one oracle legitimately carry one digest and the third differs.
+    const parsed = parseGates(ledger);
+    const digestOf = (id) => gateDefinitionDigest(parsed.gates.find((entry) => entry.id === id));
+    assert(digestOf("G1") === digestOf("G3"), "one oracle produced two digests");
+    assert(digestOf("G1") !== digestOf("G2"), "distinct oracles collapsed into one digest");
+    for (const id of ["G1", "G2", "G3"]) {
+      has(ledger, "definition-sha256=" + digestOf(id));
+    }
+    const status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 0, "shared evidence did not survive a status read\n" + status.out);
+  } finally { s.cleanup(); }
+});
+
+test("share: identity includes the resolved directory and can be turned off", async () => {
+  const s = sandbox();
+  try {
+    s.write("suite.mjs",
+      "import { appendFileSync } from 'node:fs';\n" +
+      "appendFileSync(process.env.RUNS_LOG,'run\\n');\n" +
+      "console.log('suite ok');\n");
+    s.write("sub/keep.txt", "");
+    s.write("GATES.md", gate("G1", "root", "node ../suite.mjs", "suite ok", "  CWD: sub\n") +
+      gate("G2", "root again", "node suite.mjs", "suite ok") +
+      gate("G3", "root third", "node suite.mjs", "suite ok"));
+    const shared = await gateRun(s, [], { env: { RUNS_LOG: s.path("runs.log") } });
+    assert(shared.code === 0, shared.out);
+    // A different CWD is a different observation even for the same text.
+    has(shared.out, "Jobs: 1; checks: 3; commands: 2");
+    assert(s.read("runs.log").trim().split(/\r?\n/).length === 2,
+      "CWD was ignored when sharing: " + JSON.stringify(s.read("runs.log")));
+
+    writeFileSync(s.path("runs.log"), "");
+    const separate = await gateRun(s, ["--reverify", "--no-share"],
+      { approve: false, env: { RUNS_LOG: s.path("runs.log") } });
+    assert(separate.code === 0, separate.out);
+    has(separate.out, "Jobs: 1; checks: 3; commands: 3 (sharing off)");
+    lacks(separate.out, "SHARED GATES:");
+    assert(s.read("runs.log").trim().split(/\r?\n/).length === 3,
+      "--no-share still shared an execution: " + JSON.stringify(s.read("runs.log")));
+  } finally { s.cleanup(); }
+});
+
+test("share: the sharing key cannot be forged across the directory and command boundary", async () => {
+  const s = sandbox();
+  // A directory name carrying a command prefix is the shape that a flat
+  // separator would collapse: "<base> " + "true; node p" and "<base> true; " +
+  // "node p" produce one string. These are two oracles in two directories.
+  if (process.platform === "win32") return;
+  try {
+    s.write("probe.mjs",
+      "import { appendFileSync } from 'node:fs';\n" +
+      "appendFileSync(process.env.RUNS_LOG, process.cwd() + '\\n');\n" +
+      "console.log('probe ok');\n");
+    mkdirSync(s.path("base"), { recursive: true });
+    mkdirSync(s.path("base true;"), { recursive: true });
+    s.write("GATES.md",
+      gate("G1", "plain base", "true; node ../probe.mjs", "probe ok", "  CWD: base\n") +
+      gate("G2", "base with a command-shaped name", "node ../probe.mjs", "probe ok", "  CWD: base true;\n"));
+    const result = await gateRun(s, [], { env: { RUNS_LOG: s.path("runs.log") } });
+    assert(result.code === 0, result.out);
+    has(result.out, "Jobs: 1; checks: 2; commands: 2");
+    lacks(result.out, "SHARED GATES:");
+    const visited = new Set(s.read("runs.log").trim().split(/\r?\n/));
+    assert(visited.size === 2, "two directories collapsed into one execution: " + [...visited].join(","));
+  } finally { s.cleanup(); }
+});
+
+test("share: one execution decides each EXPECT separately and a failed run fails every sharer", async () => {
+  const s = sandbox();
+  try {
+    s.write("suite.mjs", "console.log('suite ok');\n");
+    s.write("GATES.md", gate("G1", "right marker", "node suite.mjs", "suite ok") +
+      gate("G2", "wrong marker", "node suite.mjs", "suite perfect"));
+    const mixed = await gateRun(s, []);
+    assert(mixed.code === 1, "a sharing gate with a different EXPECT did not fail\n" + mixed.out);
+    has(mixed.out, "PASS GATES:G1");
+    has(mixed.out, "FAIL GATES:G2");
+
+    s.write("boom.mjs", "console.log('nope'); process.exit(3);\n");
+    s.write("GATES.md", gate("G1", "first", "node boom.mjs", "nope") +
+      gate("G2", "second", "node boom.mjs", "nope"));
+    const failed = await gateRun(s, []);
+    assert(failed.code === 1, "a nonzero shared exit certified a gate\n" + failed.out);
+    has(failed.out, "FAIL GATES:G1");
+    has(failed.out, "FAIL GATES:G2");
+    assert((failed.out.match(/exit=3/g) || []).length === 2,
+      "the shared exit status did not reach both gates\n" + failed.out);
+
+    s.write("slow.mjs", "setTimeout(()=>console.log('late'),5000);\n");
+    s.write("GATES.md", gate("G1", "first", "node slow.mjs", "late") +
+      gate("G2", "second", "node slow.mjs", "late"));
+    const timedOut = await gateRun(s, ["--timeout", "1"]);
+    assert(timedOut.code === 1, "a shared timeout certified a gate\n" + timedOut.out);
+    assert((timedOut.out.match(/timed out after 1s/g) || []).length === 2,
+      "the shared timeout did not fail both gates\n" + timedOut.out);
+  } finally { s.cleanup(); }
+});
+
 test("jobs: runner waits for stdio close so delayed descendant output is visible", async () => {
   const s = sandbox();
   try {
@@ -985,6 +1112,7 @@ test("CLI: numeric bounds, incompatible modes, and file types fail with exit 2",
       ["--jobs", "0"], ["--jobs", "1.5"], ["--jobs", "Infinity"], ["--jobs", "65"],
       ["--timeout", "0"], ["--timeout", "1.5"], ["--timeout", "86401"], ["--timeout", "Infinity"], ["--timeout"],
       ["--status", "--reverify"], ["--status", "--approve"], ["directory.md"],
+      ["--status", "--no-share"], ["--no-share", "--no-share"], ["--no-shared"],
     ];
     for (const args of cases) {
       const result = await gateRun(s, args, { approve: false });

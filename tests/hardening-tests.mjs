@@ -900,6 +900,186 @@ test("jobs: runner waits for stdio close so delayed descendant output is visible
   } finally { s.cleanup(); }
 });
 
+test("dedup: gates sharing one CHECK across ledger files execute it once, each keeping its own EXPECT verdict", async () => {
+  const s = sandbox();
+  try {
+    // A single shared CHECK, invoked from two ledger files. If dedup runs it
+    // more than once, counter.txt ends up above "1" and both gates would see
+    // "RUN 2" instead of the single "RUN 1" this test expects.
+    s.write("bump.mjs",
+      "import { readFileSync, writeFileSync, existsSync } from 'node:fs';\n" +
+      "let n = existsSync('counter.txt') ? Number(readFileSync('counter.txt','utf8')) : 0;\n" +
+      "n++;\n" +
+      "writeFileSync('counter.txt', String(n));\n" +
+      "console.log('RUN ' + n);\n");
+    s.write("A.md", gate("G1", "leader gate", "node bump.mjs", "RUN 1"));
+    s.write("B.md", gate("G2", "sharer gate with a different EXPECT", "node bump.mjs", "RUN 2"));
+    const result = await gateRun(s, ["A.md", "B.md"]);
+    assert(result.code === 1, "expected G2's independent, unmatched EXPECT to fail the run\n" + result.out);
+    assert(s.read("counter.txt").trim() === "1", "CHECK ran more than once: " + s.read("counter.txt"));
+    has(result.out, "PASS A:G1");
+    has(result.out, "FAIL B:G2");
+    has(result.out, "shared with A:G1");
+    has(s.read("A.md"), "- [x] G1");
+    has(s.read("A.md"), "automatic-evidence=v1");
+    has(s.read("B.md"), "- [ ] G2");
+    has(s.read("B.md"), "EVIDENCE: pending");
+  } finally { s.cleanup(); }
+});
+
+test("dedup: an unapproved gate sharing another gate's CHECK never runs and never borrows its result", async () => {
+  const s = sandbox();
+  try {
+    s.write("bump.mjs",
+      "import { readFileSync, writeFileSync, existsSync } from 'node:fs';\n" +
+      "let n = existsSync('counter.txt') ? Number(readFileSync('counter.txt','utf8')) : 0;\n" +
+      "n++;\n" +
+      "writeFileSync('counter.txt', String(n));\n" +
+      "console.log('RUN ' + n);\n");
+    s.write("A.md", gate("G1", "approved leader", "node bump.mjs", "/RUN \\d+/"));
+    s.write("B.md", gate("G2", "never approved sharer", "node bump.mjs", "/RUN \\d+/"));
+    const first = await gateRun(s, ["A.md"]);
+    assert(first.code === 0, first.out);
+    assert(s.read("counter.txt").trim() === "1", s.read("counter.txt"));
+
+    // Reverify with both files, but only A.md's approval already exists.
+    // B.md's identical-looking gate must stay print-only, never share A's run.
+    const second = await gateRun(s, ["A.md", "B.md", "--reverify"], { approve: false });
+    assert(second.code === 1, "G2 staying unmet should leave the run UNMET\n" + second.out);
+    has(second.out, "APPROVAL REQUIRED B:G2");
+    has(second.out, "NOT RUN: inspect this oracle");
+    assert(s.read("counter.txt").trim() === "2", "unapproved sharer changed run count: " + s.read("counter.txt"));
+    lacks(second.out, "shared with");
+    has(s.read("B.md"), "- [ ] G2");
+    has(s.read("B.md"), "EVIDENCE: pending");
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: Jobs: in the ledger sets rolling concurrency without --jobs", async () => {
+  const s = sandbox();
+  try {
+    for (let index = 1; index <= 3; index++) {
+      s.write("g" + index + ".mjs",
+        "import { appendFileSync } from 'node:fs';\n" +
+        "appendFileSync('order.log','start" + index + "\\n');\n" +
+        "setTimeout(()=>{appendFileSync('order.log','end" + index + "\\n'); console.log('OK" + index + "');},250);\n");
+    }
+    s.write("GATES.md", "Jobs: 2\n\n" +
+      gate("G1", "one", "node g1.mjs", "OK1") +
+      gate("G2", "two", "node g2.mjs", "OK2") + gate("G3", "three", "node g3.mjs", "OK3"));
+    const result = await gateRun(s, []);
+    assert(result.code === 0, result.out);
+    const order = s.read("order.log").trim().split(/\r?\n/);
+    const firstEnd = order.findIndex((line) => line.startsWith("end"));
+    assert(firstEnd >= 2, "header did not raise concurrency: " + order.join(","));
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: --jobs on the CLI overrides the ledger header", async () => {
+  const s = sandbox();
+  try {
+    for (let index = 1; index <= 2; index++) {
+      s.write("g" + index + ".mjs",
+        "import { appendFileSync } from 'node:fs';\n" +
+        "appendFileSync('order.log','start" + index + "\\n');\n" +
+        "setTimeout(()=>{appendFileSync('order.log','end" + index + "\\n'); console.log('OK" + index + "');},250);\n");
+    }
+    s.write("GATES.md", "Jobs: 1\n\n" + gate("G1", "one", "node g1.mjs", "OK1") + gate("G2", "two", "node g2.mjs", "OK2"));
+    const result = await gateRun(s, ["--jobs", "2"]);
+    assert(result.code === 0, result.out);
+    const order = s.read("order.log").trim().split(/\r?\n/);
+    const firstEnd = order.findIndex((line) => line.startsWith("end"));
+    assert(firstEnd >= 2, "CLI --jobs did not override Jobs: 1 header: " + order.join(","));
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: effective concurrency is the minimum header value across ledgers", async () => {
+  const s = sandbox();
+  try {
+    for (let index = 1; index <= 2; index++) {
+      s.write("g" + index + ".mjs",
+        "import { appendFileSync } from 'node:fs';\n" +
+        "appendFileSync('order.log','start" + index + "\\n');\n" +
+        "setTimeout(()=>{appendFileSync('order.log','end" + index + "\\n'); console.log('OK" + index + "');},250);\n");
+    }
+    s.write("A.md", "Jobs: 5\n\n" + gate("G1", "one", "node g1.mjs", "OK1"));
+    s.write("B.md", "Jobs: 1\n\n" + gate("G2", "two", "node g2.mjs", "OK2"));
+    const serialized = await gateRun(s, ["A.md", "B.md"]);
+    assert(serialized.code === 0, serialized.out);
+    let order = s.read("order.log").trim().split(/\r?\n/);
+    let firstEnd = order.findIndex((line) => line.startsWith("end"));
+    assert(firstEnd === 1, "min(5,1) should serialize, but checks overlapped: " + order.join(","));
+
+    s.write("order.log", "");
+    s.write("A.md", "Jobs: 5\n\n" + gate("G1", "one", "node g1.mjs", "OK1"));
+    s.write("B.md", "Jobs: 2\n\n" + gate("G2", "two", "node g2.mjs", "OK2"));
+    const overlapped = await gateRun(s, ["A.md", "B.md"]);
+    assert(overlapped.code === 0, overlapped.out);
+    order = s.read("order.log").trim().split(/\r?\n/);
+    firstEnd = order.findIndex((line) => line.startsWith("end"));
+    assert(firstEnd >= 2, "min(5,2) should overlap, but ran serially: " + order.join(","));
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: an out-of-range value is a parse error under both run and --status", async () => {
+  const s = sandbox();
+  try {
+    s.write("GATES.md", "Jobs: 0\n\n" + gate("G1", "manual", null, null));
+    const result = await gateRun(s, [], { approve: false });
+    assert(result.code === 2, result.out);
+    has(result.out, "Jobs needs an integer from 1 through 64");
+    const status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 2, status.out);
+    has(status.out, "Jobs needs an integer from 1 through 64");
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: hex, exponent, and decimal forms are rejected, not coerced by Number()", async () => {
+  const s = sandbox();
+  try {
+    for (const value of ["0x10", "1e1", "4.0"]) {
+      s.write("GATES.md", "Jobs: " + value + "\n\n" + gate("G1", "manual", null, null));
+      const result = await gateRun(s, [], { approve: false });
+      assert(result.code === 2, "Jobs: " + value + " should be rejected\n" + result.out);
+      has(result.out, "Jobs needs an integer from 1 through 64", "Jobs: " + value);
+    }
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: a Jobs:-looking line after the first gate is ordinary prose, not a header", async () => {
+  const s = sandbox();
+  try {
+    // A met ledger whose trailing prose happens to start with "Jobs:" must
+    // keep working everywhere: the checker, --status, and the Stop hook.
+    s.write("GATES.md",
+      "# Gates\n\n- [x] G1: done\n  EVIDENCE: measured, 8/8 passed\n\n" +
+      "Jobs: remaining items below\n");
+    const status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 0, "trailing prose Jobs: line broke --status\n" + status.out);
+    has(status.out, "ALL MET");
+    lacks(status.out, "Jobs needs an integer");
+
+    const plainRun = await gateRun(s, [], { approve: false });
+    assert(plainRun.code === 0, "trailing prose Jobs: line broke a normal run\n" + plainRun.out);
+    has(plainRun.out, "ALL MET");
+
+    const hook = await run(STOP_HOOK, [], { cwd: s.dir, stdin: JSON.stringify({ cwd: s.dir }) });
+    assert(hook.code === 0, "trailing prose Jobs: line made the Stop hook error\n" + hook.out);
+    lacks(hook.out, '"decision":"block"', "hook");
+  } finally { s.cleanup(); }
+});
+
+test("jobs header: a valid value never blocks --status, which stays non-executing", async () => {
+  const s = sandbox();
+  try {
+    s.write("GATES.md", "Jobs: 4\n\n" + gate("G1", "manual", null, null));
+    const status = await gateRun(s, ["--status"], { approve: false });
+    assert(status.code === 1, status.out);
+    has(status.out, "UNMET GATES:G1");
+    lacks(status.out, "Jobs needs an integer");
+  } finally { s.cleanup(); }
+});
+
 test("writeback: a result cannot certify a gate whose oracle changed in flight", async () => {
   const s = sandbox();
   try {

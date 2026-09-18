@@ -179,6 +179,33 @@ test("lint: a sound ledger is clean and exits 0", () => {
   assert.equal(code, 0);
 });
 
+test("lint: a Jobs: header is tolerated and never warned on", () => {
+  const withJobs = write("jobs-header.md", "Jobs: 4\n\n" + SOUND_BODY);
+  const { out, code } = lint(withJobs);
+  assert.match(out, /^LINT OK$/m);
+  assert.equal(code, 0);
+  assert.doesNotMatch(out, /Jobs/);
+});
+
+test("lint: prose starting with Jobs: after the first gate is not flagged", () => {
+  const trailingProse = write("jobs-trailing-prose.md", SOUND_BODY + "\nJobs: remaining items below\n");
+  const { out, code } = lint(trailingProse);
+  assert.match(out, /^LINT OK$/m);
+  assert.equal(code, 0);
+  assert.doesNotMatch(out, /Jobs/);
+});
+
+test("lint: an integer-looking Jobs: line after the first gate is a default-pass warning", () => {
+  const trailingHeader = write("jobs-trailing-header.md", SOUND_BODY + "\nJobs: 4\n");
+  const { out, code } = lint(trailingHeader);
+  assert.match(out, /Jobs header after first gate is ignored/);
+  assert.match(out, /LINT OK \(\d+ warning\(s\)\)/);
+  assert.equal(code, 0);
+  const strict = lint(trailingHeader, "--strict");
+  assert.equal(strict.code, 1, strict.out);
+  assert.match(strict.out, /LINT FINDINGS/);
+});
+
 test("lint: a symlink ledger is refused without changing its victim", () => {
   if (process.platform === "win32") return;
   const victim = write("symlink-victim.md", SOUND_BODY);

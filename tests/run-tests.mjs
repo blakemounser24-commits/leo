@@ -363,6 +363,16 @@ test("hook: blocks on its own scope, naming qualified ids", async () => {
   } finally { s.cleanup(); }
 });
 
+test("hook: a Jobs: header is tolerated and does not count as a gate", async () => {
+  const s = sandbox();
+  try {
+    s.write(".unlazy/api/gates/leaf-1.md", "Jobs: 3\n\n# Gates\n\n- [x] G1: done\n  EVIDENCE: measured, 8/8 passed\n");
+    const r = await run(STOP_HOOK, ["--scope", "api"], { cwd: s.dir, stdin: JSON.stringify({ cwd: s.dir }) });
+    assertLacks(r.out, '"decision":"block"', "hook");
+    assert(r.code === 0, "hook should exit 0 on a met gate plus a tolerated Jobs header");
+  } finally { s.cleanup(); }
+});
+
 test("hook: stale definition evidence blocks repeated ids without executing and keeps semantic progress", async () => {
   const s = sandbox();
   try {

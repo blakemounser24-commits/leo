@@ -175,7 +175,8 @@ if ((opt.timeout || opt.jobs || opt.shell || opt.cwd) && (action || opt.status))
 const root = resolve(opt.root || process.cwd());
 asDirectory(root, "--root");
 const timeoutSeconds = timeoutValue(opt.timeout);
-const jobs = jobCount(opt.jobs);
+const jobsCliOverride = opt.jobs !== undefined;
+let jobs = jobCount(opt.jobs);
 const defaultCwd = resolve(root, opt.cwd || ".");
 if (!action && !opt.status) asDirectory(defaultCwd, "--cwd");
 
@@ -310,6 +311,15 @@ if (action === "--claim" || action === "--release") {
 }
 
 let ledgers = target.files.map(loadLedger);
+
+// CLI --jobs wins outright. Otherwise use the minimum Jobs: header across the
+// loaded ledgers (a ledger without the header is unset, not 1); all-unset
+// falls back to jobCount's own default of 1. --status never executes, so the
+// header is parsed and tolerated there but has nothing to affect.
+if (!jobsCliOverride) {
+  const headerValues = ledgers.map((ledger) => ledger.doc.jobs).filter((value) => value !== null);
+  if (headerValues.length) jobs = Math.min(...headerValues);
+}
 
 function executableCandidates(name) {
   if (process.platform !== "win32") return [name];
@@ -600,7 +610,23 @@ function outputFingerprint(output) {
   return { sha256: sha256(value), bytes: Buffer.byteLength(value, "utf8") };
 }
 
-function runCheck(task) {
+// Gates that would execute an identical process share one execution. The key
+// covers every input the process itself depends on. EXPECT is deliberately
+// excluded: it decides a match against the shared output, not what runs.
+// Shell, timeout, platform, and PATH are single values for the whole
+// invocation, but are included anyway so this key stays correct if any of
+// them is ever made per-gate.
+function executionKey(task) {
+  return sha256(JSON.stringify({
+    check: task.gate.check, cwd: task.cwd, shell, timeoutMs: timeoutSeconds * 1000,
+    platform: process.platform, path: pathValue,
+  }));
+}
+
+// Spawns and captures a CHECK's raw output/exit status only. Matching against
+// any particular gate's EXPECT is a separate step (matchTask) so several
+// gates sharing one execution can each judge it against their own EXPECT.
+function executeTask(task) {
   return new Promise((done) => {
     const chunks = { stdout: [], stderr: [] };
     let bytes = 0;
@@ -614,7 +640,7 @@ function runCheck(task) {
     let cleanupDiagnostic = null;
     let child;
 
-    const settle = async (exitCode, signal) => {
+    const settle = (exitCode, signal) => {
       if (closed) return;
       closed = true;
       if (timeoutTimer) clearTimeout(timeoutTimer);
@@ -630,19 +656,15 @@ function runCheck(task) {
       const fingerprint = outputFingerprint(output);
       const normalizedOverflow = fingerprint.bytes > MAX_OUTPUT_BYTES;
       const overflow = rawOverflow || normalizedOverflow;
-      const match = timedOut || overflow || spawnError
-        ? { matched: false }
-        : await safeRegexMatch(task.gate.expectation, output);
       const cleanupSuffix = cleanupDiagnostic ? "; cleanup: " + cleanupDiagnostic : "";
-      const error = timedOut ? "timed out after " + timeoutSeconds + "s" + cleanupSuffix
+      const baseError = timedOut ? "timed out after " + timeoutSeconds + "s" + cleanupSuffix
         : overflow ? "output exceeded " + MAX_OUTPUT_BYTES + " bytes" +
           (rawOverflow ? "" : " after stdout/stderr UTF-8 combination") + cleanupSuffix
           : spawnError ? spawnError.message
-            : match.error || null;
+            : null;
       done({
-        ...task, output, outputFingerprint: fingerprint,
-        exitCode, signal, matched: Boolean(match.matched), error,
-        ok: !error && exitCode === 0 && Boolean(match.matched),
+        task, output, outputFingerprint: fingerprint, exitCode, signal,
+        timedOut, overflow, baseError,
       });
     };
 
@@ -691,8 +713,9 @@ function runCheck(task) {
       });
     } catch (error) {
       done({
-        ...task, ok: false, output: "", outputFingerprint: outputFingerprint(""),
-        exitCode: null, signal: null, matched: false, error: error.message,
+        task, output: "", outputFingerprint: outputFingerprint(""),
+        exitCode: null, signal: null, timedOut: false, overflow: false,
+        baseError: error.message,
       });
       return;
     }
@@ -707,14 +730,29 @@ function runCheck(task) {
   });
 }
 
-async function runRolling(tasks, limit) {
+// Judges one gate's EXPECT against a (possibly shared) execution's combined
+// output and exit status. Every gate gets its own match, independent of
+// whether its process actually ran or borrowed a sharer's execution.
+async function matchTask(task, execution) {
+  const skip = execution.timedOut || execution.overflow || Boolean(execution.baseError);
+  const match = skip ? { matched: false } : await safeRegexMatch(task.gate.expectation, execution.output);
+  const error = execution.baseError || match.error || null;
+  return {
+    ...task, output: execution.output, outputFingerprint: execution.outputFingerprint,
+    exitCode: execution.exitCode, signal: execution.signal,
+    matched: Boolean(match.matched), error,
+    ok: !error && execution.exitCode === 0 && Boolean(match.matched),
+  };
+}
+
+async function runRolling(tasks, limit, runner) {
   const results = new Array(tasks.length);
   let next = 0;
   async function worker() {
     for (;;) {
       const index = next++;
       if (index >= tasks.length) return;
-      results[index] = await runCheck(tasks[index]);
+      results[index] = await runner(tasks[index]);
     }
   }
   const workers = [];
@@ -783,7 +821,32 @@ for (const task of pending) {
 for (const task of runnable) {
   console.log("  RUN  " + qualify(task.file, task.gate.id) + " shell=" + shell + " cwd=" + task.cwd + " PATH=" + pathTranscript);
 }
-const results = opt.status ? [] : await runRolling(runnable, jobs);
+
+// Group approved, runnable gates that would execute an identical process.
+// Only the group's leader (first seen, in stable pending order) actually
+// spawns; every member — leader included — still gets its own EXPECT match
+// against that shared output, its own staleness check, and its own ledger
+// write. A shared execution occupies exactly one --jobs slot, same as any
+// other execution.
+const groupOrder = [];
+const groupsByKey = new Map();
+for (const task of runnable) {
+  const key = executionKey(task);
+  let group = groupsByKey.get(key);
+  if (!group) { group = []; groupsByKey.set(key, group); groupOrder.push(key); }
+  group.push(task);
+}
+const leaders = groupOrder.map((key) => groupsByKey.get(key)[0]);
+const executions = opt.status ? [] : await runRolling(leaders, jobs, executeTask);
+const executionByKey = new Map(groupOrder.map((key, index) => [key, executions[index]]));
+
+const results = opt.status ? [] : await Promise.all(runnable.map(async (task) => {
+  const key = executionKey(task);
+  const result = await matchTask(task, executionByKey.get(key));
+  const leader = groupsByKey.get(key)[0];
+  if (leader !== task) result.sharedWith = qualify(leader.file, leader.gate.id);
+  return result;
+}));
 for (const result of results) {
   const fingerprint = result.outputFingerprint;
   const outputSummary = result.ok
@@ -800,6 +863,7 @@ for (const result of results) {
     console.log("  FAIL " + qualify(result.file, result.gate.id) + ": " + result.gate.title);
     console.log("       " + (result.error ? result.error + "; " : "") + outcome);
   }
+  if (result.sharedWith) console.log("       shared with " + result.sharedWith);
 }
 
 function failureOutput(output, max = 480) {

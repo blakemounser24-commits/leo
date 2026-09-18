@@ -37,6 +37,7 @@ The fenced example above is documentation. Lines inside fenced code blocks are i
 - Give a runnable gate both `CHECK:` and `EXPECT:`. Give a manual gate neither. A partial runnable gate is malformed.
 - Use one `EVIDENCE:` line per gate. If it is omitted from an otherwise valid gate, the checker inserts it without changing the file's original CRLF or LF newline style.
 - Put the optional `OWNS:` header before the first gate. Separate paths with commas. Paths are repository-relative globs; absolute paths and traversal segments such as `..` are invalid.
+- Put the optional `Jobs: N` header before the first gate, at most once, with a plain decimal integer from 1 through 64. It sets the ledger's default check concurrency. `--jobs` on the command line overrides it; several ledgers without `--jobs` use the smallest declared value, and no header means `1`. An invalid or repeated header is a parse error. A `Jobs:` line after the first gate is ordinary text, not a header; `gate-lint` warns about it.
 - Write `ABANDON: <id> <reason>` only for a gate in the same file. The reason must contain non-whitespace text. An unknown id is a parse error, because silently ignoring a typo could let an otherwise green child promote its parent.
 - Start `ABANDON:` at column 1. It names its gate by id, so it is a file-level statement rather than a gate attribute, and it is the one line that must not be indented. An indented `ABANDON:` is diagnosed rather than applied.
 - Do not define a ledger with zero gates. A named empty or malformed ledger is a parse error, not `ALL MET`.

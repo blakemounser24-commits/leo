@@ -159,6 +159,11 @@ for (const file of files) {
     continue;
   }
 
+  for (const line of doc.jobsIgnored) {
+    add(file, "warn", null, "jobs-header-after-first-gate",
+      "line " + line + ": Jobs header after first gate is ignored");
+  }
+
   const live = doc.gates.filter((gate) => !doc.abandoned.has(gate.id));
   const runnable = live.filter((gate) => gate.check);
 

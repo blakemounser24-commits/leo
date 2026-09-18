@@ -239,6 +239,11 @@ const UNINDENTED_ATTR_RE = /^(CHECK|EXPECT|EVIDENCE|CWD):\s?(.*)$/;
 const ABANDON_RE = /^ABANDON:\s*(\S*)\s*(.*)$/;
 const INDENTED_ABANDON_RE = /^\s+ABANDON:/;
 const OWNS_RE = /^OWNS:\s*(.*)$/;
+const JOBS_RE = /^Jobs:\s*(.*)$/;
+// Strict positive integer, no sign, no leading zero, no hex/exponent/decimal
+// forms. Number() accepts all of those, which is exactly what a header value
+// must not silently do (0x10, 1e1, and 4.0 are not "an integer from 1 to 64").
+const JOBS_INTEGER_RE = /^[1-9][0-9]*$/;
 const FENCE_OPEN_RE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 const REGEX_RE = /^\/([\s\S]*)\/([a-z]*)$/;
 // A pattern author escapes an inner slash or has none. A literal path always
@@ -282,6 +287,9 @@ export function parseGates(text, options = {}) {
   let current = null;
   let seenGate = false;
   let fence = null;
+  let jobs = null;
+  let jobsSeen = false;
+  const jobsIgnored = [];
 
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
@@ -395,6 +403,34 @@ export function parseGates(text, options = {}) {
       }
       continue;
     }
+
+    // Jobs: is a structural header only before the first gate, exactly like
+    // OWNS:. After the first gate the same text is indistinguishable from
+    // ordinary prose (a status note, a changelog line, whatever an author
+    // wrote), so it is left alone here — not a header, not an error, and it
+    // never touches `jobs`. gate-lint separately flags an integer-looking one
+    // as an advisory warning via jobsIgnored, since a reader could mistake it
+    // for a working header.
+    const jobsMatch = !seenGate ? line.match(JOBS_RE) : null;
+    if (jobsMatch) {
+      if (jobsSeen) {
+        errors.push("line " + (index + 1) + ": duplicate Jobs declaration");
+        current = null;
+        continue;
+      }
+      jobsSeen = true;
+      const raw = jobsMatch[1].trim();
+      if (!JOBS_INTEGER_RE.test(raw) || Number(raw) > 64) {
+        errors.push("line " + (index + 1) + ": Jobs needs an integer from 1 through 64, got " + JSON.stringify(raw));
+      } else jobs = Number(raw);
+      continue;
+    }
+    if (seenGate) {
+      const trailingJobsMatch = line.match(JOBS_RE);
+      if (trailingJobsMatch && JOBS_INTEGER_RE.test(trailingJobsMatch[1].trim())) {
+        jobsIgnored.push(index + 1);
+      }
+    }
     if (/^#|^- /.test(line)) current = null;
   }
 
@@ -429,7 +465,7 @@ export function parseGates(text, options = {}) {
   }
   if (options.requireGates !== false && gates.length === 0) errors.push("ledger contains zero live gates");
 
-  return { lines, eol, finalNewline, gates, abandoned, owns, errors, warnings };
+  return { lines, eol, finalNewline, gates, abandoned, owns, jobs, jobsIgnored, errors, warnings };
 }
 
 export function formatDocument(doc) {

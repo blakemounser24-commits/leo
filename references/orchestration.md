@@ -60,7 +60,9 @@ Use `--jobs <N>` only when runnable gates are independent and parallel execution
 node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --reverify --jobs 4 .unlazy/<scope>/gates/leaf-1.1.1.md .unlazy/<scope>/gates/leaf-1.1.2.md
 ```
 
-The limit is rolling: start another check when one finishes instead of waiting for a fixed batch. Output and file updates remain deterministic in ledger order. `--jobs` controls command execution, not subagent dispatch and not dependency readiness. Use [dispatch waves](dispatch.md) for native agent concurrency.
+A ledger may declare its own default with a `Jobs: N` header before the first gate. The command-line flag wins; across several ledgers without the flag, the smallest declared value applies.
+
+The limit is rolling: start another check when one finishes instead of waiting for a fixed batch. Gates that would run an identical process, meaning the same `CHECK:`, resolved working directory, shell, timeout, and `PATH`, execute once in one slot, even across ledgers. Each approved sharer still matches its own `EXPECT:`, gets its own evidence, and prints `shared with <file>:<id>`; an unapproved sharer neither runs nor borrows the result. A branch reverifying several leaves that repeat one build command therefore pays for it once. Sharing ignores side effects between gates: if a gate between two sharers changes what the command would observe, give the later gate a distinct `CHECK:` or run it in a separate invocation. Output and file updates remain deterministic in ledger order. `--jobs` controls command execution, not subagent dispatch and not dependency readiness. Use [dispatch waves](dispatch.md) for native agent concurrency.
 
 ## Rolling dispatch
 

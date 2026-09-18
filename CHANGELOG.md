@@ -9,6 +9,11 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Add `scripts/gate-lint.mjs`, a non-executing advisory audit of ledger quality. Warn on whole fixed-output commands, weak success vocabulary, shared-parser path ambiguity, activity titles, unmeasured manual numbers, and mostly manual ledgers without pretending to shell-parse chains or argv. Default warnings retain a `LINT OK` marker and exit `0`; `--strict` makes them fail. Reject unknown short and long options, bound ledger reads, refuse linked or special-file inputs, escape terminal, line-separator, and bidirectional controls, and cap fields plus reported finding count so escaping cannot amplify output without bound.
 - Let lint reports drain pipe-backed stdout before the final exit so large JSON remains complete on every supported Node version.
 
+### Check execution
+
+- Run identical `CHECK:` processes once per invocation. Gates sharing a command, resolved working directory, shell, timeout, and `PATH` share one execution and one `--jobs` slot, across ledgers; each approved sharer still evaluates its own `EXPECT:`, stale-oracle recheck, and evidence. Unapproved sharers neither run nor borrow the result.
+- Add an optional `Jobs: N` ledger header, 1 through 64, before the first gate. `--jobs` overrides it; several ledgers use the smallest declared value; no header keeps `1`.
+
 ### Correctness and fail-closed behavior
 
 - Replace positional-argument index arithmetic with a validating CLI parser. An explicitly named ledger is the only ledger targeted, regardless of option order.

@@ -39,7 +39,7 @@ Do not silently remove an impossible gate. Add `ABANDON: <id> <non-empty reason>
 - **Orchestrated:** For a build or deep review, read the local `references/method.md`, `references/orchestration.md`, and `references/dispatch.md`. Write the contract and tree before fan-out. Give every leaf and branch its own gates file.
 - **Parallel:** Before dispatching concurrent leaves or pipelines, also read the local `references/parallel.md`. Reconcile normalized set equality between each PLAN `Owns` planning mirror and the leaf ledger's command-time `OWNS:` authority before marking it `READY` and again before claiming it, then use a dispatch launch wave. Release the exact leaf lease after parent verification. Release the whole scope only after every leaf is settled and final scope verification has run. Treat scopes, leases, and wave state as coordination, never as filesystem isolation or a security boundary.
 
-Keep check execution sequential by default. Use `--jobs <N>` only for independent runnable gates when deterministic parallel verification saves wall-clock time. Continue printing and recording results in gate order. `--jobs` never creates agent sessions; native agent concurrency follows the dispatch contract.
+Keep check execution sequential by default. Use `--jobs <N>`, or a ledger `Jobs: N` header, only for independent runnable gates when deterministic parallel verification saves wall-clock time. Gates that would run an identical process execute it once per invocation and each still matches its own `EXPECT:`. Continue printing and recording results in gate order. `--jobs` never creates agent sessions; native agent concurrency follows the dispatch contract.
 
 ## Build the Depth Tree
 

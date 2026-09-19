@@ -50,6 +50,7 @@ This section describes the current source tree. It does not claim that `2.1.0` h
 - Canonicalize the named-path identity used by every file lock, so real-root and symlink-root spellings of one physical repository cannot enter the same lease, dispatch, hook-state, or ledger critical section concurrently.
 - Describe scopes and leases as coordination rather than filesystem or process isolation.
 - Add opt-in `--jobs <N>` rolling check concurrency while retaining sequential default behavior and deterministic ledger-order reporting.
+- Under `--approve`, re-approve a met gate whose runtime approval identity changed (for example the resolved `CWD:` after `--cwd`) instead of skipping it, so a later `--reverify` can run it. Fixes #36.
 - Add declared readiness states, real `node-*` branch paths, explicit dependencies, and rolling leaf dispatch to the plan and orchestration guide.
 - Add atomic native dispatch waves that require every independent leaf to receive a distinct host start handle before the first return is accepted.
 - Add auditable dispatch abandonment for irrecoverable partial launches. Preserve the reason and timestamps in state, make status non-successful, and keep abandoned waves visible without permanently blocking Stop.

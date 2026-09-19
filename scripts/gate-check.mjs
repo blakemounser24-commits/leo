@@ -728,6 +728,24 @@ for (const ledger of ledgers) {
   for (const gate of ledger.doc.gates) {
     if (ledger.doc.abandoned.has(gate.id) || !gate.check) continue;
     const state = gateState(gate, ledger.doc.abandoned);
+    if (opt.approve && !opt.reverify && state === "met") {
+      // A met gate is not re-run, but the user asked to approve the oracle they
+      // are running under now. If its runtime approval identity changed (for
+      // example the resolved CWD after --cwd), record the approval here;
+      // otherwise the next --reverify cannot run the gate (issue #36).
+      let approved = true;
+      try { approved = approvalExists(ledger.file, gate); }
+      catch (error) { console.error("gate-check: could not validate approval for " + qualify(ledger.file, gate.id) + ": " + error.message); }
+      if (!approved) {
+        printOracle(ledger.file, gate, "APPROVAL REQUIRED");
+        try {
+          await recordApproval(ledger.file, gate);
+          console.log("    APPROVED (gate already met; approval refreshed for the current runtime identity)");
+        } catch (error) {
+          console.error("gate-check: could not record approval for " + qualify(ledger.file, gate.id) + ": " + error.message);
+        }
+      }
+    }
     if (opt.status || (!opt.reverify && state === "met")) continue;
     const cwd = resolvedGateCwd(gate, ledger.file);
     try {

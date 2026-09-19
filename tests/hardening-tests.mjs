@@ -1404,6 +1404,26 @@ test("posix integration: an exited shell leader still has its ordinary descendan
   }
 });
 
+test("approve: a met gate whose runtime identity changed is re-approved instead of skipped", async () => {
+  const s = sandbox();
+  try {
+    s.write("sub/keep.txt", "");
+    s.write("GATES.md", gate("G1", "marker", "node -e \"console.log('marker ok')\"", "marker ok"));
+    const first = await gateRun(s, []);
+    assert(first.code === 0, first.out);
+    // Same oracle, different resolved CWD: a new approval identity for a gate
+    // that is already met. --approve must record it even though nothing reruns.
+    const refreshed = await gateRun(s, ["--cwd", "sub"]);
+    assert(refreshed.code === 0, refreshed.out);
+    has(refreshed.out, "APPROVED (gate already met; approval refreshed for the current runtime identity)");
+    has(refreshed.out, "ALL MET (1 met)");
+    const reverified = await gateRun(s, ["--cwd", "sub", "--reverify"], { approve: false });
+    assert(reverified.code === 0, "reverify could not run the re-approved gate\n" + reverified.out);
+    has(reverified.out, "reran: 1");
+    lacks(reverified.out, "NOT RUN");
+  } finally { s.cleanup(); }
+});
+
 let passed = 0;
 const failures = [];
 for (const item of tests) {

@@ -665,6 +665,43 @@ test("hook: dispatch transitions reset the semantic loop guard but metadata-only
   } finally { s.cleanup(); }
 });
 
+test("ACP: session ids are opaque handles, a failed session keeps the wave open, and a retry wave reuses the session", async () => {
+  const s = sandbox();
+  const sessionA = "01a0c0c8-e143-73f1-abe0-4a3e0a7b69ac";
+  const sessionB = "01a0c0c8-eee1-71d1-be85-0b18954565f5";
+  try {
+    let result = await run([...base("open"), "--leaf", "leaf-1.1.1", "--leaf", "leaf-1.1.2"], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+
+    // Session creation succeeded for one leaf only: the other returned no session id.
+    result = await run([...base("start"), "--leaf", "leaf-1.1.2", "--handle", sessionB], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    result = await run(base("seal"), { cwd: s.dir });
+    assert(result.code === 2, "a wave with a missing ACP session should not seal, got " + result.code);
+    assertHas(result.out, "missing starts for leaf-1.1.1");
+
+    result = await run([...base("start"), "--leaf", "leaf-1.1.1", "--handle", sessionA], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    result = await run(base("seal"), { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    assertHas(result.out, "SEALED ready-1 (2/2 started)");
+
+    await run([...base("return"), "--leaf", "leaf-1.1.1"], { cwd: s.dir });
+    result = await run([...base("return"), "--leaf", "leaf-1.1.2"], { cwd: s.dir });
+    assertHas(result.out, "COMPLETE ready-1 (2/2 returned)");
+
+    // The first leaf came back empty: the same persistent session is prompted again in a new wave.
+    result = await run([...base("open", "ready-2"), "--leaf", "leaf-1.1.1"], { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    result = await run([...base("start", "ready-2"), "--leaf", "leaf-1.1.1", "--handle", sessionA], { cwd: s.dir });
+    assert(result.code === 0, "a retry wave should accept the same session id\n" + result.out);
+    result = await run(base("seal", "ready-2"), { cwd: s.dir });
+    assert(result.code === 0, result.out);
+    result = await run([...base("return", "ready-2"), "--leaf", "leaf-1.1.1"], { cwd: s.dir });
+    assertHas(result.out, "COMPLETE ready-2 (1/1 returned)");
+  } finally { s.cleanup(); }
+});
+
 test("overlap: native starts precede waits and workers run simultaneously", async () => {
   const s = sandbox();
   try {

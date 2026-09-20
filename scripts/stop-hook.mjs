@@ -2,10 +2,10 @@
 // Claude Code Stop hook for one unlazy pipeline. Zero dependencies. Node 16+.
 
 import { readFileSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   UNLAZY_DIR, gateState, hookStatePath, parseGates, qualify, readStableRegularFile,
-  resolveTarget, sha256, validateScopeId, withFileLock, writeAtomic,
+  resolveTarget, scopeRoot, sha256, validateScopeId, withFileLock, writeAtomic,
 } from "./lib/gates.mjs";
 import { dispatchStatus } from "./lib/dispatch.mjs";
 
@@ -78,6 +78,28 @@ if (target.ambiguous) {
 if (target.error && !target.ambiguous) allow("unlazy: " + safeHostText(target.error) + "; not blocking.");
 
 const discoveryErrors = target.discoveryErrors || [];
+
+// resolveTarget consults the `session` binding only when several scopes exist.
+// With a single scope every session sharing the cwd inherits that pipeline, so a
+// session working on something else in the same checkout gets blocked for gates
+// it cannot move and has to sit out its own six blocks -- one session cannot
+// consume another's guard. Read the same binding here and step aside, mirroring
+// the multi-scope diagnostic. An absent binding keeps the previous behaviour, so
+// an unbound solo pipeline still blocks its own driver.
+if (target.scope && !discoveryErrors.length) {
+  let boundSession = null;
+  try {
+    boundSession = readStableRegularFile(join(scopeRoot(root, target.scope), "session"), {
+      root, maxBytes: 4096, label: "session binding",
+    }).trim();
+  } catch { boundSession = null; }
+  if (boundSession && boundSession !== String(sessionId).trim()) {
+    const which = safeHostText(target.scope, 64);
+    allow("unlazy: scope " + which + " is bound to a different session; not blocking. " +
+      "Run gate-check.mjs --bind <this session id> --scope " + which + " to take it over.");
+  }
+}
+
 // An invalid named scope cannot safely hold its own hook-state file. Keep its
 // bounded loop-guard state at the real repository root and include the target
 // identity in the session key so it cannot collide with another scope.

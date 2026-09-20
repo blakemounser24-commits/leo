@@ -65,6 +65,24 @@ For a large regular fan-out, prefer a [Dynamic Workflow](https://code.claude.com
 
 Do not use `claude -p` as a substitute for an available native background Agent or workflow. A shell process farm loses the current session's native scheduling and observability.
 
+## ACP adapter
+
+Use this adapter when the host has no nonblocking native launch, or when one wave must mix harnesses or models that the host's native subagents cannot reach. Each leaf becomes one [Agent Client Protocol](https://agentclientprotocol.com/) session opened by an ACP client. The launch barrier is unchanged. Only the mechanism differs:
+
+1. Give every leaf its own Git worktree and use it as the session working directory. [`session/new` takes an absolute `cwd`](https://agentclientprotocol.com/protocol/session-setup) as the session's file system context. Leases coordinate ownership. They do not separate files, and ACP sessions do not share the driver's working tree the way native subagents do.
+2. Create each session synchronously and record the [session id that `session/new` returns](https://agentclientprotocol.com/protocol/session-setup#session-id) as the handle with `dispatch-check start`. It is the opaque, nonsecret host identifier the barrier requires. A session that failed to open returns no id, so the wave cannot seal.
+3. Send every leaf brief with `session/prompt` as a background process whose event stream and exit code go to files under `.unlazy/<scope>/`, then seal the wave. A prompt that is still running is a started leaf, not a returned one.
+4. Record `dispatch-check return` when the prompt process exits and the reply to `session/prompt` carries a [stop reason](https://agentclientprotocol.com/protocol/prompt-turn#stop-reasons). `end_turn` means the model stopped requesting tools. It does not mean the leaf worked. Any other stop reason, a timeout, or a truncated stream is a failed worker result: record the return and leave the leaf unverified.
+5. After parent re-verification, close each session you created and remove the worktree once its commits are integrated.
+
+Treat an `end_turn` return with no `tool_call` update in its stream as a leaf that did nothing. An agent whose model is unreachable or refused by the provider can return exactly that, with exit `0` and no error in the stream. The stream cannot say why. Query the harness outside ACP with the same model, fix the launch, and retry in a new wave. The same session id is a valid handle for the retry wave.
+
+ACP permission requests are decided per tool call, and an agent is free to never ask. Do not rely on client permission flags to keep a leaf inside its `Owns` paths. Keep the boundary structural: one worktree per leaf, plus a ledger gate that the parent re-verifies, asserting that the files changed since the branch base are a non-empty subset of the leaf's `Owns`. Never widen client permissions to get past a denial.
+
+Which leaves go to ACP, and to which agent and model, is a project decision recorded in `PLAN.md`, not a per-leaf guess. Record the model actually in use for each leaf, and read it back from the session before sending the brief.
+
+What this adapter adds: one wave can mix harnesses and models, for example a `mechanical` leaf on an inexpensive model beside a `judgment` leaf on the driver's model, and every session stays observable and cancellable through [`session/cancel`](https://agentclientprotocol.com/protocol/prompt-turn#cancellation). What it does not change: the parent runs `--reverify` on every returned leaf with its own shell and toolchain.
+
 ## Failure and fallback
 
 If a native launch fails before returning a handle, leave the wave open, fix the launch problem, and retry that leaf. Do not seal a partial wave. If recovery is impossible, preserve the audit trail instead of inventing a handle or deleting state:
@@ -73,7 +91,7 @@ If a native launch fails before returning a handle, leave the wave open, fix the
 node <skill-dir>/scripts/dispatch-check.mjs abandon --scope <scope> --wave ready-1 --reason "<bounded nonblank reason>"
 ```
 
-An abandoned wave is terminal and `status` exits `1`. The Stop hook does not block on it, but emits a bounded `HANDOFF REQUIRED` message naming the wave without copying its free-form reason into the privileged host message. Surface the reason from dispatch state in the final handoff. If the host has no nonblocking launch capability, record the limitation in `PLAN.md`, execute a declared sequential fallback, and do not open or describe a parallel wave.
+An abandoned wave is terminal and `status` exits `1`. The Stop hook does not block on it, but emits a bounded `HANDOFF REQUIRED` message naming the wave without copying its free-form reason into the privileged host message. Surface the reason from dispatch state in the final handoff. If the host has neither a nonblocking native launch nor an ACP client, record the limitation in `PLAN.md`, execute a declared sequential fallback, and do not open or describe a parallel wave.
 
 Opening a wave is an execution claim. Do not invent handles, record a foreground result as a start, or call simultaneous work proved merely because commands ran quickly.
 

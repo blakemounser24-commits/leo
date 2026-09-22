@@ -16,9 +16,11 @@ Use `OPEN`, `VERIFIED`, or `ABANDONED` for branches. Store leaf ledgers as `gate
 
 ## Driver loop
 
+Steps 3 through 6 below illustrate the action for one leaf (`leaf-1.2.1`) so each command stays concrete. Leaves already own disjoint paths, so perform that same action for every independent `READY` leaf: claim every ready leaf before opening the wave, launch them together, then verify, log, and release each return as it arrives. Do not wait for one leaf's full claim-to-release cycle to finish before claiming or launching the next ready leaf. See "Rolling dispatch" below for the loop that ties this together.
+
 1. **Plan before fan-out.** Reread the original request and current amendments. Create `.unlazy/<scope>/PLAN.md`, `.unlazy/<scope>/GATES.md`, and one ledger per leaf and branch from the templates. Inventory every independently omittable outcome and acceptance-changing constraint with a stable id, owner, observing gate or manual review, disposition, and revision. Fix interfaces, naming, toolchain, dependencies, and exact ownership before dispatch.
 2. **Inspect and approve checks.** Run `gate-check --status` on every inherited ledger. Review each `CHECK:`, `EXPECT:`, and `CWD:`, including called scripts. Determine the shell and inherited `PATH`; a new oracle with no exact approval prints its resolved values during a normal run without executing. Use `--approve` only after inspection, and do not treat normal mode as a dry run once approval exists.
-3. **Claim every concurrent leaf.** Run:
+3. **Claim every concurrent leaf.** Repeat once per independently `READY` leaf before opening the wave — claiming is what makes concurrent dispatch of leaves that already own disjoint paths safe. Run:
 
    ```text
    node <skill-dir>/scripts/gate-check.mjs --scope <scope> --leaf leaf-1.2.1 --claim
@@ -26,7 +28,7 @@ Use `OPEN`, `VERIFIED`, or `ABANDONED` for branches. Store leaf ledgers as `gate
 
    A refused claim means the split is not safe for concurrent dispatch. Change the plan or run the work sequentially; never bypass the refusal.
 4. **Launch each ready wave.** Give each leaf only the shared contract, its exact ownership and dependencies, its own ledger, and the four-pass completion rule. Open a dispatch wave for the independent `READY` leaves, call the host's native nonblocking launch once per leaf, record every host handle, and seal the wave before the first wait or result read. Follow [dispatch.md](dispatch.md); do not leak unrelated leaf histories.
-5. **Verify each return independently.** Record the native return in its wave, then re-run the returned leaf's runnable gates, including already checked gates:
+5. **Verify each return independently.** Do this per leaf as its wave return arrives, not once for the whole wave at the end. Record the native return in its wave, then re-run the returned leaf's runnable gates, including already checked gates:
 
    ```text
    node <skill-dir>/scripts/gate-check.mjs --root . --cwd . --reverify .unlazy/<scope>/gates/leaf-1.2.1.md
@@ -64,7 +66,7 @@ The limit is rolling: start another check when one finishes instead of waiting f
 
 ## Rolling dispatch
 
-Treat dispatch as a loop:
+This is the driver loop above, stated as one continuous loop instead of the single-leaf walkthrough in steps 3 through 6. Treat dispatch as a loop:
 
 ```text
 while an unverified leaf remains:

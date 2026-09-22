@@ -900,6 +900,38 @@ test("jobs: runner waits for stdio close so delayed descendant output is visible
   } finally { s.cleanup(); }
 });
 
+// references/orchestration.md documents rolling dispatch against several
+// named leaf ledgers reverified together, e.g. `--reverify --jobs <N>
+// gates/leaf-a.md gates/leaf-b.md ...`. The two tests above already cover
+// --jobs concurrency and ordering against gates within one shared file; this
+// exercises the actual multi-file explicit-ledger --reverify path the docs
+// describe, including that each separate ledger is written back correctly.
+test("jobs: --reverify accepts several named leaf ledgers and updates each independently", async () => {
+  const s = sandbox();
+  try {
+    for (const id of ["a", "b", "c"]) {
+      s.write(id + ".mjs",
+        "import { appendFileSync } from 'node:fs';\n" +
+        "appendFileSync('order.log','start-" + id + "\\n');\n" +
+        "setTimeout(()=>{appendFileSync('order.log','end-" + id + "\\n'); console.log('OK-" + id + "');},200);\n");
+      s.write("gates/leaf-" + id + ".md", gate("G1", "leaf " + id + " passes", "node " + id + ".mjs", "OK-" + id));
+    }
+    const files = ["gates/leaf-a.md", "gates/leaf-b.md", "gates/leaf-c.md"];
+    const result = await gateRun(s, ["--cwd", ".", "--reverify", "--jobs", "3", ...files]);
+    assert(result.code === 0, result.out);
+    has(result.out, "ALL MET");
+    for (const id of ["a", "b", "c"]) {
+      has(result.out, "PASS leaf-" + id + ":G1");
+      const ledger = s.read("gates/leaf-" + id + ".md");
+      has(ledger, "- [x] G1:", "leaf-" + id + " ledger");
+      has(ledger, "automatic-evidence=v1", "leaf-" + id + " ledger");
+    }
+    const order = s.read("order.log").trim().split(/\r?\n/);
+    const firstEnd = order.findIndex((line) => line.startsWith("end-"));
+    assert(firstEnd >= 2, "three separately-ledgered leaves did not overlap under --jobs 3: " + order.join(","));
+  } finally { s.cleanup(); }
+});
+
 test("writeback: a result cannot certify a gate whose oracle changed in flight", async () => {
   const s = sandbox();
   try {

@@ -117,6 +117,16 @@ const WEAK_EXPECT = new Set([
 ]);
 // Openings that name an activity rather than an outcome a stranger could judge.
 const ACTIVITY_START = /^(work(ing)? on|improve|enhance|handle|support|ensure|make sure|try|attempt|look (at|into)|investigate|consider|review|refactor|clean ?up|polish|update|tidy|address|deal with|add support)\b/i;
+// references/gates.md, "Leaf gates versus branch gates": a leaf ledger proves
+// one leaf, and a whole-project check smuggled into it makes every per-leaf
+// --reverify re-run the entire tree. The concrete footgun is a CHECK that
+// drives gate-check.mjs without naming an explicit .md ledger: with no scope
+// pipeline action (--claim/--release/--log/--bind/--list-scopes/--help) at
+// play, that falls back to scope-wide or legacy discovery, which gathers
+// GATES.md plus every gates/*.md instead of the one ledger this gate proves.
+const CHECKER_INVOCATION_RE = /\bgate-check\.mjs\b/;
+const EXPLICIT_LEDGER_ARG_RE = /(?:^|[\s"'])[^\s"']*\.md(?=$|[\s"'])/i;
+const NON_LEDGER_ACTION_RE = /--claim\b|--release\b|--log\b|--bind\b|--list-scopes\b|--help\b|(?:^|\s)-h(?:\s|$)/;
 const findings = [];
 let errorCount = 0;
 let warningCount = 0;
@@ -168,6 +178,14 @@ for (const file of files) {
     if (check && FIXED_OUTPUT_COMMAND.test(check)) {
       add(file, "warn", id, "tautological-check",
         'CHECK looks like a fixed-output command: "' + check + '"; use an oracle that observes the named outcome');
+    }
+
+    if (check && CHECKER_INVOCATION_RE.test(check) && !NON_LEDGER_ACTION_RE.test(check) &&
+        !EXPLICIT_LEDGER_ARG_RE.test(check)) {
+      add(file, "warn", id, "whole-tree-recheck",
+        'CHECK drives gate-check.mjs without naming an explicit .md ledger: "' + check +
+        '"; unnamed discovery gathers GATES.md plus every gates/*.md instead of the one ' +
+        "ledger this gate proves — name the exact leaf or child ledger file(s)");
     }
 
     if (expect && WEAK_EXPECT.has(expect.trim().toLowerCase())) {

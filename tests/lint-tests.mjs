@@ -161,6 +161,39 @@ test("lint: a literal path read as a regex is warned", () => {
   assert.match(lint(WEAK).out, /G4:.*looks like a literal path/);
 });
 
+test("lint: a leaf CHECK that reverifies without naming a ledger is warned", () => {
+  const glob = write("whole-tree.md", `# Gates: leaf that reverifies the whole tree
+
+- [ ] G1: sibling leaves also pass
+  CHECK: node scripts/gate-check.mjs --scope demo --reverify
+  EXPECT: ALL MET
+  EVIDENCE: pending
+`);
+  assert.match(lint(glob).out, /G1:.*without naming an explicit \.md ledger/);
+});
+
+test("lint: a CHECK naming its exact ledger file is not warned for whole-tree recheck", () => {
+  const named = write("named-ledger.md", `# Gates: branch that reverifies its named children
+
+- [ ] N1: every named direct child is reverified from its exact ledger
+  CHECK: node scripts/gate-check.mjs --root . --cwd . --reverify .unlazy/demo/gates/leaf-a.md .unlazy/demo/gates/node-b.md
+  EXPECT: ALL MET
+  EVIDENCE: pending
+`);
+  assert.doesNotMatch(lint(named).out, /whole-tree-recheck|without naming an explicit/);
+});
+
+test("lint: a gate-check pipeline action (claim/release/log) is not warned for whole-tree recheck", () => {
+  const action = write("pipeline-action.md", `# Gates: leaf that only claims and releases its own lease
+
+- [ ] G1: lease was claimed for this leaf
+  CHECK: node scripts/gate-check.mjs --scope demo --leaf leaf-a --claim
+  EXPECT: CLAIMED
+  EVIDENCE: pending
+`);
+  assert.doesNotMatch(lint(action).out, /whole-tree-recheck/);
+});
+
 test("lint: a deliberate slash wrapped pattern is not warned", () => {
   assert.doesNotMatch(lint(SOUND).out, /looks like a literal path/);
 });

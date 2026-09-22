@@ -28,8 +28,13 @@ guarantee:
   already fixed.
 
 If the host exposes a documented model or reasoning control, the driver may map
-these tiers through that host-specific control at launch. If no such control is
-available, retain the tier as a briefing and review requirement and do not claim
+these tiers through that host-specific control at launch. One concrete instance
+of such a control is a model-routing skill or command that takes a leaf's
+`Scope` line and returns a recommended model tier by complexity; when the host
+exposes one, the driver may pass it that input and record its recommendation as
+the mapping, but still owns the launch decision and does not claim the
+recommendation as proof the right model ran. If no such control is available,
+retain the tier as a briefing and review requirement and do not claim
 that a particular model or reasoning level was selected.
 
 Driver and branch duties are not leaf tiers. Contract and architecture work,

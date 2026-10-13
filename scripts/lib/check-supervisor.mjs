@@ -4,10 +4,31 @@
 
 import { spawn } from "node:child_process";
 
-const [shell, command] = process.argv.slice(2);
-if (!shell || command === undefined) {
-  console.error("unlazy-check-supervisor: expected resolved shell and CHECK command");
+const [shell, command, runnerArg] = process.argv.slice(2);
+const runnerPid = Number(runnerArg);
+if (!shell || command === undefined || !Number.isInteger(runnerPid) || runnerPid < 1) {
+  console.error("unlazy-check-supervisor: expected resolved shell, CHECK command, and runner pid");
   process.exit(2);
+}
+
+// A CHECK must never outlive the gate-check that started it. On POSIX this
+// supervisor runs detached as its own process-group leader, so when the runner
+// dies without cleaning up (SIGKILL, a host shell timeout) nothing signals the
+// group: the supervisor is reparented and the CHECK keeps running, and a CHECK
+// that itself starts gate-check can multiply without bound. Linux has
+// PR_SET_PDEATHSIG and macOS has kqueue NOTE_EXIT, but Node exposes neither,
+// so polling the parent pid is the only portable zero-dependency signal. The
+// runner passes its own pid, which also catches a runner that died while this
+// process was still starting. On a change, SIGKILL the whole group: the
+// CHECK's shell, its descendants, and this supervisor. Windows is not spawned
+// detached and its cleanup goes through terminateProcessTree, so it is left
+// unchanged.
+if (process.platform !== "win32") {
+  const runnerGone = () => {
+    if (process.ppid !== runnerPid) process.kill(-process.pid, "SIGKILL");
+  };
+  runnerGone();
+  setInterval(runnerGone, 1000).unref();
 }
 
 let child;

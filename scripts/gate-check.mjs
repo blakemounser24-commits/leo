@@ -309,6 +309,36 @@ if (action === "--claim" || action === "--release") {
   process.exit(0);
 }
 
+// Self-check guard. A gate whose CHECK runs gate-check over the ledger it is in
+// (for example `--scope X` from a gate in .unlazy/X/GATES.md) would start
+// another run of that same gate, without end. Each CHECK inherits
+// UNLAZY_CHECKING: the realpaths of the ledgers whose gates are running in the
+// enclosing chain, the inherited set plus the ledger that owns that CHECK's
+// gate. A run whose target includes one of them fails at once, so the loop
+// becomes one failing gate whose output names the cause. Only the owning
+// ledger is added, not every ledger this run targets: a scope run also targets
+// gates/leaf-*.md, and a branch gate there must still be able to check its
+// leaves. Every nested level adds a ledger not yet in the chain, so nesting is
+// bounded by the number of ledgers. --status and the pipeline actions
+// (--claim, --release, --log, --bind, --list-scopes) execute no CHECK and so
+// cannot recurse; they have already exited above or are exempt here.
+const CHECKING_ENV = "UNLAZY_CHECKING";
+const inheritedChecking = String(process.env[CHECKING_ENV] || "").split(delimiter).filter(Boolean);
+if (!opt.status) {
+  const already = new Set(inheritedChecking);
+  const selfChecked = target.files.map((file) => realpathSync(file)).find((file) => already.has(file));
+  if (selfChecked) {
+    console.error("gate-check: refusing to check " + selfChecked + ": an enclosing gate-check is already running a gate in it");
+    console.error("gate-check: its gate's CHECK runs gate-check over the ledger it is in; a gate can't check its own ledger. " +
+      "Name the other ledgers explicitly (gate-check.mjs ... path/to/leaf.md ...)");
+    process.exit(2);
+  }
+}
+function checkEnv(file) {
+  const chain = new Set([...inheritedChecking, realpathSync(file)]);
+  return { ...process.env, [CHECKING_ENV]: [...chain].join(delimiter) };
+}
+
 let ledgers = target.files.map(loadLedger);
 
 function executableCandidates(name) {
@@ -681,12 +711,12 @@ function runCheck(task) {
     };
 
     try {
-      child = spawn(process.execPath, [CHECK_SUPERVISOR, shell, task.gate.check], {
+      child = spawn(process.execPath, [CHECK_SUPERVISOR, shell, task.gate.check, String(process.pid)], {
         cwd: task.cwd,
         shell: false,
         windowsHide: true,
         detached: process.platform !== "win32",
-        env: process.env,
+        env: checkEnv(task.file),
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
